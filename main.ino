@@ -4,6 +4,13 @@
 #include <Wire.h>
 #include <RTClib.h>
 
+// UART Registers for Arduino Mega 2560
+volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
+volatile unsigned char *myUCSR0B = (unsigned char *)0x00C1;
+volatile unsigned char *myUCSR0C = (unsigned char *)0x00C2;
+volatile unsigned int  *myUBRR0  = (unsigned int *)0x00C4;
+volatile unsigned char *myUDR0   = (unsigned char *)0x00C6;
+
 // Pin definitions
 #define WATER_SENSOR_PIN A15
 #define FAN_PIN 26
@@ -30,7 +37,7 @@
 // Stepper motor configuration
 const int stepsPerRevolution = 2048; // per my stepper motor
 #define ANGLE_PER_CYCLE 15 //change accordingly
-const int stepsPerCycle = (stepsPerRevolution / 360)*ANGLE_PER_CYCLE;
+const int stepsPerCycle = (stepsPerRevolution / 360) * ANGLE_PER_CYCLE;
 
 // Initialize objects
 LiquidCrystal lcd(35, 37, 39, 41, 43, 45); // LCD pins
@@ -56,27 +63,27 @@ int lastMinUpdate;
 float temperature, humidity;
 
 void setup() {
-  // Initialize serial communication
-  Serial.begin(9600);
-  
+  // Initialize UART communication
+  U0init(9600);
+
   // Initialize LCD
   lcd.begin(16, 2);
-  
+
   // Initialize RTC
   rtc.begin();
 
   // checking to make sure the rtc module is working properly . . .
   Wire.begin();
   if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
+    U0putstring("Couldn't find RTC");
     while (1);
   }
 
   if (rtc.lostPower()) {
-    Serial.println("RTC lost power, let's set the time!");
+    U0putstring("RTC lost power, let's set the time!");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-  
+
   // Initialize stepper motor
   stepper.setSpeed(12); //rpm
 
@@ -86,192 +93,146 @@ void setup() {
   humidity = dht.readHumidity();
 
   lastMinUpdate = (int)rtc.now().minute();
-  
+
   // Initialize pins
-  pinMode(DHTPIN, INPUT_PULLUP); // Manually enable pull-up resistor, KEEP THIS PULLED UP!!!!
-  pinMode(WATER_SENSOR_PIN, INPUT);
-  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(START_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(STOP_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(MOTOR_UP_PIN, INPUT_PULLUP);
-  pinMode(MOTOR_DOWN_PIN, INPUT_PULLUP);
-  pinMode(LED_RED_PIN, OUTPUT);
-  pinMode(LED_GREEN_PIN, OUTPUT);
-  pinMode(LED_BLUE_PIN, OUTPUT);
-  pinMode(LED_YELLOW_PIN, OUTPUT);
-  pinMode(FAN_PIN, OUTPUT);
-  pinMode(FAN_ENABLE_PIN, OUTPUT);
-  
+  DDRK &= ~(1 << 7); // DHTPIN as input
+  DDRF &= ~(1 << 7); // WATER_SENSOR_PIN as input
+  DDRF &= ~(1 << 5); // RESET_BUTTON_PIN as input
+  DDRF &= ~(1 << 4); // START_BUTTON_PIN as input
+  DDRF &= ~(1 << 3); // STOP_BUTTON_PIN as input
+  DDRF &= ~(1 << 2); // MOTOR_UP_PIN as input
+  DDRF &= ~(1 << 1); // MOTOR_DOWN_PIN as input
+  DDRB |= (1 << 6); // LED_RED_PIN as output
+  DDRJ |= (1 << 7); // LED_GREEN_PIN as output
+  DDRH |= (1 << 5); // LED_BLUE_PIN as output
+  DDRH |= (1 << 3); // LED_YELLOW_PIN as output
+  DDRG |= (1 << 4); // FAN_PIN as output
+  DDRG |= (1 << 3); // FAN_ENABLE_PIN as output
+
   // Turn off all LEDs initially
-  digitalWrite(LED_RED_PIN, LOW);
-  digitalWrite(LED_GREEN_PIN, LOW);
-  digitalWrite(LED_BLUE_PIN, LOW);
-  digitalWrite(LED_YELLOW_PIN, LOW);
+  PORTB &= ~(1 << 6); // LED_RED_PIN LOW
+  PORTJ &= ~(1 << 7); // LED_GREEN_PIN LOW
+  PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+  PORTH &= ~(1 << 3); // LED_YELLOW_PIN LOW
 
   reportStateTransition("DISABLED"); // inital state for the system
 }
 
 void loop() {
   DateTime now = rtc.now();
-  // Serial.print(now.hour(), DEC);
-  // Serial.print(':');
-  // Serial.print(now.minute(), DEC);
-  // Serial.print(':');
-  // Serial.println(now.second(), DEC);
 
-  // Serial.print("State: "); Serial.print(currentState);
-  // Serial.print(" // Temp:"); Serial.print(dht.readTemperature());
-  // Serial.print(" // Humidity:"); Serial.print(dht.readHumidity());
-  // Serial.print(" // Water Level:"); Serial.print(checkWaterLevel());
-  // Serial.print(" // Start:"); Serial.print(digitalRead(START_BUTTON_PIN));
-  // Serial.print(" // Stop:"); Serial.print(digitalRead(STOP_BUTTON_PIN));
-  // Serial.print(" // Reset:"); Serial.print(digitalRead(STOP_BUTTON_PIN));
-  // Serial.print(" // MUP:"); Serial.print(digitalRead(MOTOR_UP_PIN));
-  // Serial.print(" // MDN:"); Serial.print(digitalRead(MOTOR_DOWN_PIN));
-  // Serial.print(" // Minute:"); Serial.print((int)now.minute());
-  // Serial.print(" // Update:"); Serial.print(lastMinUpdate);
-  // Serial.print("\n");
-
-    if(currentState == DISABLED) {
-      // start button press?
-      lcd.clear();
-      digitalWrite(LED_YELLOW_PIN, HIGH); // Yellow LED ON
-      digitalWrite(LED_GREEN_PIN, LOW); // Green LED OFF
-      if (digitalRead(START_BUTTON_PIN) == HIGH) {
-        currentState = IDLE;
-        digitalWrite(LED_YELLOW_PIN, LOW); // Yellow LED OFF
-        updateLCD();
-        reportStateTransition("IDLE");
-      }
-    }
-    else if(currentState == IDLE) {
-      //Serial.print("&&&&&&&&&&&&&&&");
-      measureTempHum();
-      digitalWrite(LED_GREEN_PIN, HIGH);
-      digitalWrite(LED_BLUE_PIN, LOW);
-
-      // temp + hum monitoring
-      if ((lastMinUpdate < (int)now.minute()) || ((int)(now.minute() == 0) && (lastMinUpdate != 0))) { //update ONLY every minute
-        updateLCD();
-      }
-
-      // Keep water in res at or above threshold
-      if (checkWaterLevel() < WATER_THRESHOLD) {
-        currentState = ERROR_STATE;
-        reportStateTransition("ERROR");
-      }
-      
-      // Stop button?
-      else if (digitalRead(STOP_BUTTON_PIN) == HIGH) {
-        currentState = DISABLED;
-        reportStateTransition("DISABLED");
-      }
-
-      // high temp -> RUNNING state
-      else if (temperature > TEMPERATURE_THRESHOLD) {
-        currentState = RUNNING;
-        reportStateTransition("RUNNING");
-        updateLCD();
-      }
-
-      //Serial.print("->->->->->->");
-      moveStepMotor(); //yuh
-    }
-    else if(currentState == ERROR_STATE) {
-      // Error message to LCD that water level is low (DO NOT MONITOR TEMP + HUMIDITY)
-      lcd.clear();
-      lcd.print("WATER LEVEL IS");
-      lcd.setCursor(0, 1);
-      lcd.print("TOO LOW");
-      digitalWrite(LED_RED_PIN, HIGH);
-      digitalWrite(LED_BLUE_PIN, LOW);
-      digitalWrite(LED_GREEN_PIN, LOW);
-      
-      // Rest system to IDLE if water level is okay, and reset button pressed
-      if ((checkWaterLevel() >= WATER_THRESHOLD) && (digitalRead(RESET_BUTTON_PIN)  == HIGH )) {
-        currentState = IDLE;
-        digitalWrite(LED_RED_PIN, LOW); // Red LED OFF
-        reportStateTransition("IDLE");
-      }
-      
-      // Stop button?
-      else if (digitalRead(STOP_BUTTON_PIN) == HIGH) {
-        currentState = DISABLED;
-        digitalWrite(LED_RED_PIN, LOW); // Red LED OFF
-        reportStateTransition("DISABLED");
-      }
-
-      //Serial.print("->->->->->->");
-      moveStepMotor();
-    }
-    else if (currentState == RUNNING) {
-      //Serial.print("WEARERUNNINGWEARERUNNING");
+  if (currentState == DISABLED) {
+    // start button press?
+    lcd.clear();
+    PORTH |= (1 << 3); // LED_YELLOW_PIN HIGH
+    PORTJ &= ~(1 << 7); // LED_GREEN_PIN LOW
+    if (!(PINF & (1 << 4))) { // START_BUTTON_PIN is HIGH
+      currentState = IDLE;
+      PORTH &= ~(1 << 3); // LED_YELLOW_PIN LOW
       updateLCD();
-      measureTempHum();
-      digitalWrite(LED_BLUE_PIN, HIGH);
-      digitalWrite(LED_GREEN_PIN, LOW);
-      digitalWrite(FAN_ENABLE_PIN, HIGH);
-      digitalWrite(FAN_PIN, HIGH);
-
-      // Temp + hum monitoring
-      if ((lastMinUpdate < (int)now.minute()) || ((int)(now.minute() == 0) && (lastMinUpdate != 0))) { //update ONLY every minute
-        updateLCD();
-      }
-
-      // monitor water level!
-      if (checkWaterLevel() < WATER_THRESHOLD) {
-        currentState = ERROR_STATE;
-        digitalWrite(LED_BLUE_PIN, LOW); // Blue LED OFF
-        digitalWrite(FAN_ENABLE_PIN, LOW);
-        digitalWrite(FAN_PIN, LOW);
-        Serial.print("TURNING OFF FAN");
-        Serial.print(" at ");
-        Serial.print(now.hour(), DEC);
-        Serial.print(':');
-        Serial.print(now.minute(), DEC);
-        Serial.print(':');
-        Serial.println(now.second(), DEC);
-        Serial.print("\n");
-        reportStateTransition("ERROR");
-      }
-
-      // stop button pressed??
-      else if (digitalRead(STOP_BUTTON_PIN) == HIGH) {
-        currentState = DISABLED;
-        digitalWrite(LED_BLUE_PIN, LOW); // Blue LED OFF
-        digitalWrite(FAN_ENABLE_PIN, LOW);
-        digitalWrite(FAN_PIN, LOW);
-        Serial.print("TURNING OFF FAN");
-        Serial.print(" at ");
-        Serial.print(now.hour(), DEC);
-        Serial.print(':');
-        Serial.print(now.minute(), DEC);
-        Serial.print(':');
-        Serial.println(now.second(), DEC);
-        Serial.print("\n");
-        reportStateTransition("DISABLED");
-      }
-      //if temp low -> IDLE
-      else if ((!isnan(temperature)) && (temperature <= TEMPERATURE_THRESHOLD)) {
-        digitalWrite(LED_BLUE_PIN, LOW); // Blue LED OFF
-        digitalWrite(FAN_ENABLE_PIN, LOW);
-        digitalWrite(FAN_PIN, LOW);
-        Serial.print("TURNING OFF FAN");
-        Serial.print(" at ");
-        Serial.print(now.hour(), DEC);
-        Serial.print(':');
-        Serial.print(now.minute(), DEC);
-        Serial.print(':');
-        Serial.println(now.second(), DEC);
-        Serial.print("\n");
-        currentState = IDLE;
-        reportStateTransition("IDLE");
-      }
-      //Serial.print("->->->->->->");
-      moveStepMotor();
+      reportStateTransition("IDLE");
     }
-  
-  //delay(1000); //Delay to prevent rapid state changes
+  }
+  else if (currentState == IDLE) {
+    measureTempHum();
+    PORTJ |= (1 << 7); // LED_GREEN_PIN HIGH
+    PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+
+    // temp + hum monitoring
+    if ((lastMinUpdate < (int)now.minute()) || ((int)(now.minute() == 0) && (lastMinUpdate != 0))) { //update ONLY every minute
+      updateLCD();
+    }
+
+    // Keep water in res at or above threshold
+    if (checkWaterLevel() < WATER_THRESHOLD) {
+      currentState = ERROR_STATE;
+      reportStateTransition("ERROR");
+    }
+
+    // Stop button?
+    else if (!(PINF & (1 << 3))) { // STOP_BUTTON_PIN is HIGH
+      currentState = DISABLED;
+      reportStateTransition("DISABLED");
+    }
+
+    // high temp -> RUNNING state
+    else if (temperature > TEMPERATURE_THRESHOLD) {
+      currentState = RUNNING;
+      reportStateTransition("RUNNING");
+      updateLCD();
+    }
+
+    moveStepMotor(); //yuh
+  }
+  else if (currentState == ERROR_STATE) {
+    // Error message to LCD that water level is low (DO NOT MONITOR TEMP + HUMIDITY)
+    lcd.clear();
+    lcd.print("WATER LEVEL IS");
+    lcd.setCursor(0, 1);
+    lcd.print("TOO LOW");
+    PORTB |= (1 << 6); // LED_RED_PIN HIGH
+    PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+    PORTJ &= ~(1 << 7); // LED_GREEN_PIN LOW
+
+    // Rest system to IDLE if water level is okay, and reset button pressed
+    if ((checkWaterLevel() >= WATER_THRESHOLD) && !(PINF & (1 << 5))) { // RESET_BUTTON_PIN is HIGH
+      currentState = IDLE;
+      PORTB &= ~(1 << 6); // LED_RED_PIN LOW
+      reportStateTransition("IDLE");
+    }
+
+    // Stop button?
+    else if (!(PINF & (1 << 3))) { // STOP_BUTTON_PIN is HIGH
+      currentState = DISABLED;
+      PORTB &= ~(1 << 6); // LED_RED_PIN LOW
+      reportStateTransition("DISABLED");
+    }
+
+    moveStepMotor();
+  }
+  else if (currentState == RUNNING) {
+    updateLCD();
+    measureTempHum();
+    PORTH |= (1 << 5); // LED_BLUE_PIN HIGH
+    PORTJ &= ~(1 << 7); // LED_GREEN_PIN LOW
+    PORTG |= (1 << 3); // FAN_ENABLE_PIN HIGH
+    PORTG |= (1 << 4); // FAN_PIN HIGH
+
+    // Temp + hum monitoring
+    if ((lastMinUpdate < (int)now.minute()) || ((int)(now.minute() == 0) && (lastMinUpdate != 0))) { //update ONLY every minute
+      updateLCD();
+    }
+
+    // monitor water level!
+    if (checkWaterLevel() < WATER_THRESHOLD) {
+      currentState = ERROR_STATE;
+      PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+      PORTG &= ~(1 << 3); // FAN_ENABLE_PIN LOW
+      PORTG &= ~(1 << 4); // FAN_PIN LOW
+      U0putstring("TURNING OFF FAN");
+      reportStateTransition("ERROR");
+    }
+
+    // stop button pressed??
+    else if (!(PINF & (1 << 3))) { // STOP_BUTTON_PIN is HIGH
+      currentState = DISABLED;
+      PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+      PORTG &= ~(1 << 3); // FAN_ENABLE_PIN LOW
+      PORTG &= ~(1 << 4); // FAN_PIN LOW
+      U0putstring("TURNING OFF FAN");
+      reportStateTransition("DISABLED");
+    }
+    //if temp low -> IDLE
+    else if ((!isnan(temperature)) && (temperature <= TEMPERATURE_THRESHOLD)) {
+      PORTH &= ~(1 << 5); // LED_BLUE_PIN LOW
+      PORTG &= ~(1 << 3); // FAN_ENABLE_PIN LOW
+      PORTG &= ~(1 << 4); // FAN_PIN LOW
+      U0putstring("TURNING OFF FAN");
+      currentState = IDLE;
+      reportStateTransition("IDLE");
+    }
+    moveStepMotor();
+  }
 }
 
 float checkWaterLevel() {
@@ -282,31 +243,32 @@ float checkWaterLevel() {
 }
 
 void moveStepMotor() {
-  //Serial.print("@@@@@@@@@@@@");
-  if(digitalRead(MOTOR_UP_PIN) == 1) {
-    Serial.print("MOVING STEPPER MOTOR CLKWISE "); Serial.print(ANGLE_PER_CYCLE); Serial.print(" DEGREES\n");
+  if (PINF & (1 << 2)) { // MOTOR_UP_PIN is HIGH
+    U0putstring("MOVING STEPPER MOTOR CLKWISE ");
+    U0putstring(ANGLE_PER_CYCLE);
+    U0putstring(" DEGREES\n");
     stepper.step(stepsPerCycle);
   }
-  else if(digitalRead(MOTOR_DOWN_PIN) == 1) {
-    Serial.print("MOVING STEPPER MOTOR CNTR CLKWISE "); Serial.print(ANGLE_PER_CYCLE); Serial.print(" DEGREES\n");
+  else if (PINF & (1 << 1)) { // MOTOR_DOWN_PIN is HIGH
+    U0putstring("MOVING STEPPER MOTOR CNTR CLKWISE ");
+    U0putstring(ANGLE_PER_CYCLE);
+    U0putstring(" DEGREES\n");
     stepper.step(-stepsPerCycle);
   }
 }
 
 void updateLCD() {
   DateTime now = rtc.now();
-  //if ((lastMinUpdate < now.minute()) || ((now.minute() == 0) && (lastMinUpdate != 0))) { //update ONLY every minute
-    lcd.clear();
-    lcd.print("Temp: ");
-    lcd.print(temperature);
-    lcd.print("C");
-    lcd.setCursor(0, 1);
-    lcd.print("Humidity: ");
-    lcd.print(humidity);
-    lcd.print("%");
+  lcd.clear();
+  lcd.print("Temp: ");
+  lcd.print(temperature);
+  lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Humidity: ");
+  lcd.print(humidity);
+  lcd.print("%");
 
-    lastMinUpdate = now.minute(); //update last... update
-  //}
+  lastMinUpdate = now.minute(); //update last... update
 }
 
 void measureTempHum() {
@@ -318,24 +280,68 @@ void measureTempHum() {
 
 void reportStateTransition(String state) {
   DateTime now = rtc.now();
-  Serial.print("State changed to ");
-  Serial.print(state);
-  Serial.print(" at ");
-  Serial.print(now.hour(), DEC);
-  Serial.print(':');
-  Serial.print(now.minute(), DEC);
-  Serial.print(':');
-  Serial.println(now.second(), DEC);
+  U0putstring("State changed to ");
+  U0putstring(state.c_str());
+  U0putstring(" at ");
+  U0putstring(now.hour());
+  U0putchar(':');
+  U0putstring(now.minute());
+  U0putchar(':');
+  U0putstring(now.second());
+  U0putchar('\n');
 
   //Report turning on fan, if we just moved to RUNNING state . . .
   if (state == "RUNNING") {
-    Serial.print("TURNING ON FAN");
-    Serial.print(" at ");
-    Serial.print(now.hour(), DEC);
-    Serial.print(':');
-    Serial.print(now.minute(), DEC);
-    Serial.print(':');
-    Serial.println(now.second(), DEC);
+    U0putstring("TURNING ON FAN");
+    U0putstring(" at ");
+    U0putstring(now.hour());
+    U0putchar(':');
+    U0putstring(now.minute());
+    U0putchar(':');
+    U0putstring(now.second());
+    U0putchar('\n');
+  }
+}
+
+void U0init(unsigned long U0baud)
+{
+  unsigned long FCPU = 16000000;
+  unsigned int tbaud;
+  tbaud = (FCPU / 16 / U0baud - 1);
+  *myUCSR0A = 0x20;
+  *myUCSR0B = 0x18;
+  *myUCSR0C = 0x06;
+  *myUBRR0  = tbaud;
+}
+
+unsigned char U0kbhit()
+{
+  // Check the RDA (Receive Data Available) bit in UCSR0A
+  // RDA bit is bit 7
+  return (*myUCSR0A & (1 << 7)) != 0;
+}
+
+unsigned char U0getchar()
+{
+  // Wait for data to be received
+  while (!U0kbhit());
+  // Read data from the buffer
+  return *myUDR0;
+}
+
+void U0putchar(unsigned char U0pdata)
+{
+  // Wait for the transmit buffer to be empty
+  while (!(*myUCSR0A & (1 << 5))); // Wait for TBE (Transmit Buffer Empty) bit
+  // Put data into buffer, which will be transmitted
+  *myUDR0 = U0pdata;
+}
+
+void U0putstring(char *U0data)
+{
+  while (*U0data != '\0') {
+    U0putchar(*U0data);
+    U0data++;
   }
 }
 
